@@ -1,0 +1,35 @@
+{
+  "name": "@snow-the/dsh-snapshot",
+  "version": "0.1.0",
+  "description": "Backup / restore / rotate snapshots of ~/.dsh for DeepSeek Harness — sha256-verified archives with path-traversal protection (own-built, replacing third-party backup plugins).",
+  "type": "module",
+  "main": "./dist/index.js",
+  "license": "MIT",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "backup",
+    "deepseek-harness"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "node --test test/"
+  },
+  "files": [
+    "dist",
+    "cordis.patch.yml",
+    "LICENSE",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/snow-The/dsh-own-plugins.git",
+    "directory": "dsh-snapshot"
+  },
+  "types": "./dist/index.d.ts"
+}
