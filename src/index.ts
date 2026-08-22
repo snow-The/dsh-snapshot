@@ -14,6 +14,7 @@ import { join } from 'node:path'
 import { readdir, stat, unlink, access, mkdir, writeFile, readFile } from 'node:fs/promises'
 import { createReadStream } from 'node:fs'
 import { createHash } from 'node:crypto'
+import { Hono } from 'hono'
 
 export const name = 'snapshot'
 export const inject = ['tools']
@@ -195,4 +196,22 @@ export function apply(ctx: Ctx): void {
   for (const tool of [backupTool, listTool, restoreTool]) {
     try { ctx.tools.register(tool) } catch (err) { console.error(`[snapshot] ${tool.name} skipped: ${err}`) }
   }
+
+  // Hono app: try to mount on the host http service when available.
+  try {
+    const http = (ctx as unknown as { http?: { mount?: (p: string, f: unknown) => void } }).http
+    if (http?.mount) http.mount('/snapshot', createHonoApp(ctx).fetch)
+  } catch { /* no host http service */ }
+}
+
+// --- Hono app factory (same pattern as dsh-codex) ---
+
+export interface AppEnv {
+  Bindings: { ctx: unknown }
+}
+
+export function createHonoApp(_ctx: unknown): Hono<AppEnv> {
+  const app = new Hono<AppEnv>()
+  app.get('/api/snapshot/health', (c) => c.json({ ok: true, plugin: 'dsh-snapshot', ts: true, hono: true, backupsDir: outDir() }))
+  return app
 }

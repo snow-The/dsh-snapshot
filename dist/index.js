@@ -14,6 +14,7 @@ import { join } from 'node:path';
 import { readdir, stat, unlink, access, mkdir, writeFile, readFile } from 'node:fs/promises';
 import { createReadStream } from 'node:fs';
 import { createHash } from 'node:crypto';
+import { Hono } from 'hono';
 export const name = 'snapshot';
 export const inject = ['tools'];
 const dshHome = () => process.env.DSH_HOME ?? join(homedir(), '.dsh');
@@ -179,4 +180,16 @@ export function apply(ctx) {
             console.error(`[snapshot] ${tool.name} skipped: ${err}`);
         }
     }
+    // Hono app: try to mount on the host http service when available.
+    try {
+        const http = ctx.http;
+        if (http?.mount)
+            http.mount('/snapshot', createHonoApp(ctx).fetch);
+    }
+    catch { /* no host http service */ }
+}
+export function createHonoApp(_ctx) {
+    const app = new Hono();
+    app.get('/api/snapshot/health', (c) => c.json({ ok: true, plugin: 'dsh-snapshot', ts: true, hono: true, backupsDir: outDir() }));
+    return app;
 }
