@@ -9,7 +9,7 @@ process.env.DSH_SNAPSHOT_DIR = mkdtempSync(join(tmpdir(), 'snap-out-'))
 const home = process.env.DSH_HOME
 const out = process.env.DSH_SNAPSHOT_DIR
 
-const { apply } = await import('../lib/index.js')
+const { apply } = await import('../dist/index.js')
 
 function makeCtx() {
   const tools = []
