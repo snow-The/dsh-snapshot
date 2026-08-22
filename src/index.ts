@@ -98,7 +98,25 @@ async function listSnapshots(): Promise<Snap[]> {
   return snaps.sort((a, b) => b.file.localeCompare(a.file))
 }
 
-export function apply(ctx: Ctx): void {
+export function apply(ctx: Ctx): (() => void) | void {
+async function createBackup(keep: number): Promise<Json> {
+  const file = `dsh-backup-${ts()}.tar.gz`
+  const dest = join(outDir(), file)
+  await mkdir(outDir(), { recursive: true })
+  const excl = ['--exclude=node_modules', '--exclude=cache']
+  await run('tar', ['-czf', dest, '-C', dshHome(), ...excl, '.'], { windowsHide: true })
+  const hash = await sha256(dest)
+  await writeFile(dest + '.sha256', hash + '  ' + file + '\n')
+  const snaps = await listSnapshots()
+  let removed = 0
+  for (const s of snaps.slice(keep)) {
+    await unlink(join(outDir(), s.file)).catch(() => {})
+    await unlink(join(outDir(), s.file + '.sha256')).catch(() => {})
+    removed++
+  }
+  return { ok: true, file, sha256: hash, size: (await stat(dest)).size, removed }
+}
+
   const backupTool: Tool = {
     name: 'snapshot_backup',
     description:
@@ -115,21 +133,7 @@ export function apply(ctx: Ctx): void {
     presentCall: (a) => ({ card: 'generic', title: 'snapshot backup', kind: 'write', rawInput: a }),
     async execute(args) {
       const keep = Math.min(Math.max(1, typeof (args as Record<string, Json>).keep === 'number' ? ((args as Record<string, Json>).keep as number) : 10), MAX_KEEP)
-      const file = `dsh-backup-${ts()}.tar.gz`
-      const dest = join(outDir(), file)
-      await mkdir(outDir(), { recursive: true })
-      const excl = ['--exclude=node_modules', '--exclude=cache']
-      await run('tar', ['-czf', dest, '-C', dshHome(), ...excl, '.'], { windowsHide: true })
-      const hash = await sha256(dest)
-      await writeFile(dest + '.sha256', hash + '  ' + file + '\n')
-      const snaps = await listSnapshots()
-      let removed = 0
-      for (const s of snaps.slice(keep)) {
-        await unlink(join(outDir(), s.file)).catch(() => {})
-        await unlink(join(outDir(), s.file + '.sha256')).catch(() => {})
-        removed++
-      }
-      return { ok: true, file, sha256: hash, size: (await stat(dest)).size, removed }
+      return createBackup(keep)
     },
   }
 
@@ -197,11 +201,37 @@ export function apply(ctx: Ctx): void {
     try { ctx.tools.register(tool) } catch (err) { console.error(`[snapshot] ${tool.name} skipped: ${err}`) }
   }
 
+  // ---- auto-backup: DSH_SNAPSHOT_INTERVAL_HOURS (>0) enables hourly checks ----
+  const intervalHours = Number(process.env.DSH_SNAPSHOT_INTERVAL_HOURS ?? '0')
+  let timer: ReturnType<typeof setInterval> | null = null
+  if (intervalHours > 0) {
+    const newestAgeMs = async (): Promise<number> => {
+      const snaps = await listSnapshots()
+      const f = snaps[0]?.file
+      const m = f ? f.match(/dsh-backup-(\d{8})-(\d{6})\.tar\.gz$/) : null
+      if (!m) return Number.POSITIVE_INFINITY
+      const d = m[1], tm = m[2]
+      const ms = Date.parse(`${d.slice(0,4)}-${d.slice(4,6)}-${d.slice(6,8)}T${tm.slice(0,2)}:${tm.slice(2,4)}:${tm.slice(4,6)}`)
+      return Number.isNaN(ms) ? Number.POSITIVE_INFINITY : Date.now() - ms
+    }
+    const check = async (): Promise<void> => {
+      try {
+        const age = await newestAgeMs()
+        if (age >= intervalHours * 3600_000) await createBackup(10)
+      } catch { /* never crash the host */ }
+    }
+    void check(),
+    timer = setInterval(check, 3600_000),
+    timer.unref?.()
+  }
+
   // Hono app: try to mount on the host http service when available.
   try {
     const http = (ctx as unknown as { http?: { mount?: (p: string, f: unknown) => void } }).http
     if (http?.mount) http.mount('/snapshot', createHonoApp(ctx).fetch)
   } catch { /* no host http service */ }
+  return () => { if (timer) clearInterval(timer) }
+
 }
 
 // --- Hono app factory (same pattern as dsh-codex) ---

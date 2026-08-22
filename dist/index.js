@@ -2148,6 +2148,25 @@ async function listSnapshots() {
   return snaps.sort((a, b) => b.file.localeCompare(a.file));
 }
 function apply(ctx) {
+  async function createBackup(keep) {
+    const file = `dsh-backup-${ts()}.tar.gz`;
+    const dest = join(outDir(), file);
+    await mkdir(outDir(), { recursive: true });
+    const excl = ["--exclude=node_modules", "--exclude=cache"];
+    await run("tar", ["-czf", dest, "-C", dshHome(), ...excl, "."], { windowsHide: true });
+    const hash = await sha2562(dest);
+    await writeFile(dest + ".sha256", hash + "  " + file + "\n");
+    const snaps = await listSnapshots();
+    let removed = 0;
+    for (const s of snaps.slice(keep)) {
+      await unlink(join(outDir(), s.file)).catch(() => {
+      });
+      await unlink(join(outDir(), s.file + ".sha256")).catch(() => {
+      });
+      removed++;
+    }
+    return { ok: true, file, sha256: hash, size: (await stat(dest)).size, removed };
+  }
   const backupTool = {
     name: "snapshot_backup",
     description: "Create a gzip tar snapshot of ~/.dsh (configs, sessions, credentials, plugin manifests; node_modules and cache excluded) into ~/dsh-backups with a sha256 sidecar, then enforce retention (keep newest N).",
@@ -2163,23 +2182,7 @@ function apply(ctx) {
     presentCall: (a) => ({ card: "generic", title: "snapshot backup", kind: "write", rawInput: a }),
     async execute(args) {
       const keep = Math.min(Math.max(1, typeof args.keep === "number" ? args.keep : 10), MAX_KEEP);
-      const file = `dsh-backup-${ts()}.tar.gz`;
-      const dest = join(outDir(), file);
-      await mkdir(outDir(), { recursive: true });
-      const excl = ["--exclude=node_modules", "--exclude=cache"];
-      await run("tar", ["-czf", dest, "-C", dshHome(), ...excl, "."], { windowsHide: true });
-      const hash = await sha2562(dest);
-      await writeFile(dest + ".sha256", hash + "  " + file + "\n");
-      const snaps = await listSnapshots();
-      let removed = 0;
-      for (const s of snaps.slice(keep)) {
-        await unlink(join(outDir(), s.file)).catch(() => {
-        });
-        await unlink(join(outDir(), s.file + ".sha256")).catch(() => {
-        });
-        removed++;
-      }
-      return { ok: true, file, sha256: hash, size: (await stat(dest)).size, removed };
+      return createBackup(keep);
     }
   };
   const listTool = {
@@ -2247,11 +2250,35 @@ function apply(ctx) {
       console.error(`[snapshot] ${tool.name} skipped: ${err}`);
     }
   }
+  const intervalHours = Number(process.env.DSH_SNAPSHOT_INTERVAL_HOURS ?? "0");
+  let timer = null;
+  if (intervalHours > 0) {
+    const newestAgeMs = async () => {
+      const snaps = await listSnapshots();
+      const f = snaps[0]?.file;
+      const m = f ? f.match(/dsh-backup-(\d{8})-(\d{6})\.tar\.gz$/) : null;
+      if (!m) return Number.POSITIVE_INFINITY;
+      const d = m[1], tm = m[2];
+      const ms = Date.parse(`${d.slice(0, 4)}-${d.slice(4, 6)}-${d.slice(6, 8)}T${tm.slice(0, 2)}:${tm.slice(2, 4)}:${tm.slice(4, 6)}`);
+      return Number.isNaN(ms) ? Number.POSITIVE_INFINITY : Date.now() - ms;
+    };
+    const check = async () => {
+      try {
+        const age = await newestAgeMs();
+        if (age >= intervalHours * 36e5) await createBackup(10);
+      } catch {
+      }
+    };
+    void check(), timer = setInterval(check, 36e5), timer.unref?.();
+  }
   try {
     const http = ctx.http;
     if (http?.mount) http.mount("/snapshot", createHonoApp(ctx).fetch);
   } catch {
   }
+  return () => {
+    if (timer) clearInterval(timer);
+  };
 }
 function createHonoApp(_ctx) {
   const app = new Hono2();

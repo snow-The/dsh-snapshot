@@ -31,7 +31,7 @@ interface Ctx {
         register: (tool: Tool) => void;
     };
 }
-export declare function apply(ctx: Ctx): void;
+export declare function apply(ctx: Ctx): (() => void) | void;
 export interface AppEnv {
     Bindings: {
         ctx: unknown;

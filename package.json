@@ -1,6 +1,6 @@
 {
   "name": "@snow-the/dsh-snapshot",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Backup / restore / rotate snapshots of ~/.dsh for DeepSeek Harness — sha256-verified archives with path-traversal protection (own-built, replacing third-party backup plugins).",
   "type": "module",
   "main": "./dist/index.js",
