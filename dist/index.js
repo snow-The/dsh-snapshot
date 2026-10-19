@@ -168,7 +168,7 @@ function apply(ctx) {
     try {
       ctx.tools.register(tool);
     } catch (err) {
-      console.error(`[snapshot] ${tool.name} skipped: ${err}`);
+      console.error(`[dsh-snapshot] ${tool.name} skipped: ${err}`);
     }
   }
   const intervalHours = Number(process.env.DSH_SNAPSHOT_INTERVAL_HOURS ?? "0");

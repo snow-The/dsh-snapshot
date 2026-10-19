@@ -214,7 +214,7 @@ async function createBackup(keep: number): Promise<Json> {
   }
 
   for (const tool of [backupTool, listTool, restoreTool]) {
-    try { ctx.tools.register(tool) } catch (err) { console.error(`[snapshot] ${tool.name} skipped: ${err}`) }
+    try { ctx.tools.register(tool) } catch (err) { console.error(`[dsh-snapshot] ${tool.name} skipped: ${err}`) }
   }
 
   // ---- auto-backup: DSH_SNAPSHOT_INTERVAL_HOURS (>0) enables hourly checks ----
