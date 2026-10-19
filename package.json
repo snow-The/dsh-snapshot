@@ -28,9 +28,10 @@
     "compatibility": {
       "dshReleases": [
         "0.2.0-rc.1",
-        "0.2.0-rc.2"
+        "0.2.0-rc.2",
+        "0.2.1-rc.2"
       ],
-      "verifiedAgainst": "0.2.0-rc.2"
+      "verifiedAgainst": "0.2.1-rc.2"
     }
   },
   "repository": {
@@ -46,5 +47,8 @@
   },
   "peerDependencies": {
     "@deepseek-ai/dsh": ">=0.2.0-rc.1"
+  },
+  "engines": {
+    "dsh": ">=0.2.1-rc.2 <0.3.0-0"
   }
 }
