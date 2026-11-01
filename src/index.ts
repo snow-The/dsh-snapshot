@@ -11,7 +11,7 @@
 import { spawn } from 'node:child_process'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { readdir, stat, unlink, access, mkdir, writeFile, readFile } from 'node:fs/promises'
+import { readdir, stat, unlink, access, mkdir, writeFile, readFile, open } from 'node:fs/promises'
 import { createReadStream } from 'node:fs'
 import { createHash } from 'node:crypto'
 import type { IncomingMessage, ServerResponse } from 'node:http'
@@ -114,23 +114,83 @@ async function listSnapshots(): Promise<Snap[]> {
   return snaps.sort((a, b) => b.file.localeCompare(a.file))
 }
 
+/**
+ * 備份鎖：**跨行程**互斥。
+ *
+ * 為什麼需要（2026-11-01 實測，不是假想的風險）：
+ *   · 這台機器上真的同時跑過兩個宿主（pid 13168 與 32880）。
+ *   · 檔名只精確到**秒**（`dsh-backup-YYYYMMDD-HHMMSS.tar.gz`），兩個行程若在同一秒起跑，
+ *     會**撞同一個檔名**，兩個 tar 同時寫同一個檔案 —— 產出的是壞掉的壓縮包，
+ *     而 sha256 旁邊那個 .sha256 就變成「對不起來的憑證」。
+ *   · 這種壞掉最惡劣的地方是它**不報錯**：隔天要回復才發現。
+ *
+ * 設計（跟 bus / tunnel 的守護同一套）：探測被動、行動有租約、過期可接管。
+ */
+const LOCK_NAME = '.backup.lock'
+const LOCK_STALE_MS = 15 * 60_000
+
+async function acquireBackupLock(): Promise<() => Promise<void>> {
+  const lockPath = join(outDir(), LOCK_NAME)
+  await mkdir(outDir(), { recursive: true })
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const fh = await open(lockPath, 'wx')          // wx = O_CREAT|O_EXCL，原子
+      await fh.writeFile(JSON.stringify({ pid: process.pid, at: new Date().toISOString() }))
+      await fh.close()
+      return async () => { await unlink(lockPath).catch(() => {}) }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+      // 鎖已被佔用：過期就接管，否則誠實拒絕（不做「假裝成功」）
+      let ageMs: number
+      try { ageMs = Date.now() - (await stat(lockPath)).mtimeMs } catch { ageMs = LOCK_STALE_MS + 1 }
+      if (ageMs > LOCK_STALE_MS) {
+        await unlink(lockPath).catch(() => {})
+        continue
+      }
+      let holder = ''
+      try { holder = (await readFile(lockPath, 'utf8')).trim() } catch {}
+      throw new Error(
+        `另一個備份正在進行（鎖建立於 ${Math.round(ageMs / 1000)} 秒前${holder ? `，${holder}` : ''}）。` +
+          `兩個行程同時打 tar 會撞到同一個檔名並寫壞壓縮包，所以這次不執行；` +
+          `若確定前一個行程已死，等 ${Math.round(LOCK_STALE_MS / 60000)} 分鐘它會自動過期或被接管。`,
+      )
+    }
+  }
+  throw new Error('取不到備份鎖（連續兩次都被佔用）')
+}
+
 export function apply(ctx: Ctx): (() => void) | void {
 async function createBackup(keep: number): Promise<Json> {
-  const file = `dsh-backup-${ts()}.tar.gz`
-  const dest = join(outDir(), file)
-  await mkdir(outDir(), { recursive: true })
-  const excl = ['--exclude=node_modules', '--exclude=cache']
-  await run('tar', ['-czf', dest, '-C', dshHome(), ...excl, '.'], { windowsHide: true })
-  const hash = await sha256(dest)
-  await writeFile(dest + '.sha256', hash + '  ' + file + '\n')
-  const snaps = await listSnapshots()
-  let removed = 0
-  for (const s of snaps.slice(keep)) {
-    await unlink(join(outDir(), s.file)).catch(() => {})
-    await unlink(join(outDir(), s.file + '.sha256')).catch(() => {})
-    removed++
+  const release = await acquireBackupLock()
+  try {
+    let file = `dsh-backup-${ts()}.tar.gz`
+    let dest = join(outDir(), file)
+    // 鎖保證「同時只有一個行程」，但前一次崩在 tar 中途可能留下**同名殘檔**。
+    // 撞名時等到下一秒換名，不要覆蓋：覆蓋會把一個也許完整的備份換成半個。
+    if (await access(dest).then(() => true, () => false)) {
+      await new Promise((resolve) => setTimeout(resolve, 1100))
+      file = `dsh-backup-${ts()}.tar.gz`
+      dest = join(outDir(), file)
+    }
+    await mkdir(outDir(), { recursive: true })
+    // 排除：依赖树、快取，以及 **home-archive**。
+    // 2026-11-01：`~/.dsh/home-archive` 收了 5.77 GB（旧备份/隔离区/参考克隆）——它是**备份的备份**，
+    // 再打进去会让每次快照都白白多压 5.8 GB，而且那些内容本来就不属于「当前状态」。
+    const excl = ['--exclude=node_modules', '--exclude=cache', '--exclude=home-archive']
+    await run('tar', ['-czf', dest, '-C', dshHome(), ...excl, '.'], { windowsHide: true })
+    const hash = await sha256(dest)
+    await writeFile(dest + '.sha256', hash + '  ' + file + '\n')
+    const snaps = await listSnapshots()
+    let removed = 0
+    for (const s of snaps.slice(keep)) {
+      await unlink(join(outDir(), s.file)).catch(() => {})
+      await unlink(join(outDir(), s.file + '.sha256')).catch(() => {})
+      removed++
+    }
+    return { ok: true, file, sha256: hash, size: (await stat(dest)).size, removed }
+  } finally {
+    await release()
   }
-  return { ok: true, file, sha256: hash, size: (await stat(dest)).size, removed }
 }
 
   const backupTool: Tool = {
