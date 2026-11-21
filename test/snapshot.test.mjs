@@ -171,3 +171,74 @@ test('apply tolerates a host without webServer (no throw)', () => {
   apply(makeCtx())                                     // 朴素 ctx: 连 inject 都没有
   assert.doesNotThrow(() => apply(cordisCtx({ extra: { tools: makeCtx().tools } })))  // 有 inject, 服务缺席
 })
+
+
+// ---------------------------------------------------------------------------------------------
+// Official Host/Origin + browser-auth fence (copied from @deepseek-ai/dsh-host-open-in-app; the
+// provenance block in src/index.ts names the exact official lines).
+//
+// DISCRIMINATING, by construction: every case asserts BOTH the status AND that the handler's own
+// payload was never produced (`res.body === undefined` and no content-type). Status alone cannot
+// prove our fence ran -- the platform also rejects /api requests by itself (see
+// _recover/verify-webServer-routes.mjs, CTRL-B), and that control is deliberately kept red.
+// Remove the guard from the handler and every case below goes red; that is verified by
+// _recover/reverse-verify-fence.mjs, which disarms the built artifact and requires the suite to fail.
+// ---------------------------------------------------------------------------------------------
+
+/** Mount the routes with a fence whose verdict the test controls. */
+function mountWithFence(rejection) {
+  const routes = new Map()
+  // 'unavailable' models a composition that never registered the `connection` service at all.
+  const ctx = rejection === 'unavailable'
+    ? {}
+    : { get: (name) => (name === 'connection' ? { requestRejection: () => rejection } : undefined) }
+  registerHttpRoutes(ctx, (kind, path, handler) => routes.set(path, { kind, handler }))
+  return routes
+}
+
+const FENCE_ROUTES = ['/api/snapshot/health']
+
+/** Drive one registered handler with a fake native req/res. */
+async function driveFence(routes, path, method = 'GET') {
+  const route = routes.get(path)
+  assert.ok(route, 'route not registered: ' + path)
+  const res = { statusCode: 0, headers: {}, body: undefined, setHeader(k, v) { this.headers[k] = v }, end(b) { this.body = b } }
+  await route.handler({ method, url: path }, res)
+  return res
+}
+
+test('fence: a 401 from the connection service is answered 401 and the handler never runs', async () => {
+  const routes = mountWithFence(401)
+  for (const path of FENCE_ROUTES) {
+    const res = await driveFence(routes, path)
+    assert.equal(res.statusCode, 401)
+    assert.equal(res.body, undefined, 'the handler payload must not be produced')
+    assert.equal(res.headers['content-type'], undefined, 'the JSON responder must not run')
+  }
+})
+
+test('fence: a 403 from the connection service is answered 403 and the handler never runs', async () => {
+  const routes = mountWithFence(403)
+  for (const path of FENCE_ROUTES) {
+    const res = await driveFence(routes, path)
+    assert.equal(res.statusCode, 403)
+    assert.equal(res.body, undefined, 'the handler payload must not be produced')
+    assert.equal(res.headers['content-type'], undefined, 'the JSON responder must not run')
+  }
+})
+
+test('fence: an unreachable connection service fails CLOSED with 503, never forwarding', async () => {
+  const routes = mountWithFence('unavailable')
+  for (const path of FENCE_ROUTES) {
+    const res = await driveFence(routes, path)
+    assert.equal(res.statusCode, 503, 'a missing fence must NOT fall through to the handler')
+    assert.match(String(res.body), /unavailable/)
+    assert.equal(res.headers['content-type'], 'application/json; charset=utf-8')
+  }
+})
+
+test('fence: the fence runs BEFORE the method check', async () => {
+  const routes = mountWithFence(403)
+  const res = await driveFence(routes, FENCE_ROUTES[0], 'POST')
+  assert.equal(res.statusCode, 403, 'a rejected request must not be downgraded to 405')
+})

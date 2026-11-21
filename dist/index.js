@@ -2,7 +2,7 @@
 import { spawn } from "node:child_process";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { readdir, stat, unlink, access, mkdir, writeFile, readFile } from "node:fs/promises";
+import { readdir, stat, unlink, access, mkdir, writeFile, readFile, open } from "node:fs/promises";
 import { createReadStream } from "node:fs";
 import { createHash } from "node:crypto";
 var name = "snapshot";
@@ -68,25 +68,74 @@ async function listSnapshots() {
   }
   return snaps.sort((a, b) => b.file.localeCompare(a.file));
 }
+var LOCK_NAME = ".backup.lock";
+var LOCK_STALE_MS = 15 * 6e4;
+async function acquireBackupLock() {
+  const lockPath = join(outDir(), LOCK_NAME);
+  await mkdir(outDir(), { recursive: true });
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const fh = await open(lockPath, "wx");
+      await fh.writeFile(JSON.stringify({ pid: process.pid, at: (/* @__PURE__ */ new Date()).toISOString() }));
+      await fh.close();
+      return async () => {
+        await unlink(lockPath).catch(() => {
+        });
+      };
+    } catch (error) {
+      if (error.code !== "EEXIST") throw error;
+      let ageMs;
+      try {
+        ageMs = Date.now() - (await stat(lockPath)).mtimeMs;
+      } catch {
+        ageMs = LOCK_STALE_MS + 1;
+      }
+      if (ageMs > LOCK_STALE_MS) {
+        await unlink(lockPath).catch(() => {
+        });
+        continue;
+      }
+      let holder = "";
+      try {
+        holder = (await readFile(lockPath, "utf8")).trim();
+      } catch {
+      }
+      throw new Error(
+        `\u53E6\u4E00\u500B\u5099\u4EFD\u6B63\u5728\u9032\u884C\uFF08\u9396\u5EFA\u7ACB\u65BC ${Math.round(ageMs / 1e3)} \u79D2\u524D${holder ? `\uFF0C${holder}` : ""}\uFF09\u3002\u5169\u500B\u884C\u7A0B\u540C\u6642\u6253 tar \u6703\u649E\u5230\u540C\u4E00\u500B\u6A94\u540D\u4E26\u5BEB\u58DE\u58D3\u7E2E\u5305\uFF0C\u6240\u4EE5\u9019\u6B21\u4E0D\u57F7\u884C\uFF1B\u82E5\u78BA\u5B9A\u524D\u4E00\u500B\u884C\u7A0B\u5DF2\u6B7B\uFF0C\u7B49 ${Math.round(LOCK_STALE_MS / 6e4)} \u5206\u9418\u5B83\u6703\u81EA\u52D5\u904E\u671F\u6216\u88AB\u63A5\u7BA1\u3002`
+      );
+    }
+  }
+  throw new Error("\u53D6\u4E0D\u5230\u5099\u4EFD\u9396\uFF08\u9023\u7E8C\u5169\u6B21\u90FD\u88AB\u4F54\u7528\uFF09");
+}
 function apply(ctx) {
   async function createBackup(keep) {
-    const file = `dsh-backup-${ts()}.tar.gz`;
-    const dest = join(outDir(), file);
-    await mkdir(outDir(), { recursive: true });
-    const excl = ["--exclude=node_modules", "--exclude=cache"];
-    await run("tar", ["-czf", dest, "-C", dshHome(), ...excl, "."], { windowsHide: true });
-    const hash = await sha256(dest);
-    await writeFile(dest + ".sha256", hash + "  " + file + "\n");
-    const snaps = await listSnapshots();
-    let removed = 0;
-    for (const s of snaps.slice(keep)) {
-      await unlink(join(outDir(), s.file)).catch(() => {
-      });
-      await unlink(join(outDir(), s.file + ".sha256")).catch(() => {
-      });
-      removed++;
+    const release = await acquireBackupLock();
+    try {
+      let file = `dsh-backup-${ts()}.tar.gz`;
+      let dest = join(outDir(), file);
+      if (await access(dest).then(() => true, () => false)) {
+        await new Promise((resolve) => setTimeout(resolve, 1100));
+        file = `dsh-backup-${ts()}.tar.gz`;
+        dest = join(outDir(), file);
+      }
+      await mkdir(outDir(), { recursive: true });
+      const excl = ["--exclude=node_modules", "--exclude=cache", "--exclude=home-archive"];
+      await run("tar", ["-czf", dest, "-C", dshHome(), ...excl, "."], { windowsHide: true });
+      const hash = await sha256(dest);
+      await writeFile(dest + ".sha256", hash + "  " + file + "\n");
+      const snaps = await listSnapshots();
+      let removed = 0;
+      for (const s of snaps.slice(keep)) {
+        await unlink(join(outDir(), s.file)).catch(() => {
+        });
+        await unlink(join(outDir(), s.file + ".sha256")).catch(() => {
+        });
+        removed++;
+      }
+      return { ok: true, file, sha256: hash, size: (await stat(dest)).size, removed };
+    } finally {
+      await release();
     }
-    return { ok: true, file, sha256: hash, size: (await stat(dest)).size, removed };
   }
   const backupTool = {
     name: "snapshot_backup",
